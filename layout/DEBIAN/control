@@ -1,0 +1,9 @@
+Name: GlasklartHD
+Version: 5.68.1
+Description: The Retina Glasklart Theme
+Maintainer: waruhachi
+Author: Max Rudberg
+Section: Themes
+Architecture: iphoneos-arm
+Depends: com.spark.snowboard | com.anemonetheming.anemone
+Package: com.maxrudberg.glasklart.hd

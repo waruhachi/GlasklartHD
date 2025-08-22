@@ -1,0 +1,166 @@
+name: Package and Release Theme
+
+permissions:
+  contents: write
+
+on:
+    push:
+      branches:
+        - main
+    workflow_dispatch:
+
+jobs:
+    prepare:
+        name: Prepare Theme
+        runs-on: macos-latest
+        strategy:
+            matrix:
+                scheme: [rootful, rootless]
+        outputs:
+            bundle_id: ${{ steps.metadata.outputs.bundle_id }}
+            version: ${{ steps.metadata.outputs.version }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v5
+              with:
+                submodules: recursive
+
+            - name: Extract Bundle ID and Version
+              id: metadata
+              run: |
+                BUNDLE_ID=$(awk -F': ' '/^Package:/ {print $2}' layout/DEBIAN/control | tr -d '\r')
+                VERSION=$(awk -F': ' '/^Version:/ {print $2}' layout/DEBIAN/control | tr -d '\r')
+                echo "bundle_id=${BUNDLE_ID}" >> "$GITHUB_OUTPUT"
+                echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare rootful directory
+              if: matrix.scheme == 'rootful'
+              run: |
+                mkdir -p ${{ matrix.scheme }}
+                mkdir -p ${{ matrix.scheme }}/DEBIAN
+                mkdir -p ${{ matrix.scheme }}/Library/Themes
+
+                cp layout/DEBIAN/control ${{ matrix.scheme }}/DEBIAN/control
+                cp -r Theme/* ${{ matrix.scheme }}/Library/Themes/
+
+            - name: Prepare rootless directory
+              if: matrix.scheme == 'rootless'
+              run: |
+                mkdir -p ${{ matrix.scheme }}
+                mkdir -p ${{ matrix.scheme }}/DEBIAN
+                mkdir -p ${{ matrix.scheme }}/var/jb/Library/Themes
+
+                cp layout/DEBIAN/control ${{ matrix.scheme }}/DEBIAN/control
+                cp -r Theme/* ${{ matrix.scheme }}/var/jb/Library/Themes/
+
+            - name: Zip ${{ matrix.scheme }} folder
+              run: |
+                zip -r ${{ matrix.scheme }}.zip ${{ matrix.scheme }}/
+
+            - name: Upload prepared directories
+              uses: actions/upload-artifact@v4
+              with:
+                name: directories-${{ matrix.scheme }}
+                path: |
+                  ${{ matrix.scheme }}.zip
+    
+    package:
+        name: Package Theme
+        runs-on: macos-latest
+        strategy:
+            matrix:
+                scheme: [rootful, rootless]
+        needs: prepare
+        env:
+          BUNDLE_ID: ${{ needs.prepare.outputs.bundle_id }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        steps:
+          - name: Download prepared directories
+            uses: actions/download-artifact@v4
+            with:
+              name: directories-${{ matrix.scheme }}
+              path: .
+
+          - name: Install dpkg
+            run: |
+              brew install dpkg
+
+          - name: Unzip ${{ matrix.scheme }} folder
+            run: |
+              unzip ${{ matrix.scheme }}.zip
+
+          - name: Package ${{ matrix.scheme }}
+            run: |
+              cd ${{ matrix.scheme }}
+              mkdir -p ../themes
+              if [ "${{ matrix.scheme }}" = "rootless" ]; then ARCH="iphoneos-arm64"; else ARCH="iphoneos-arm"; fi
+              dpkg-deb -b . ../themes/$BUNDLE_ID-$VERSION-$ARCH.deb
+              cd ..
+
+          - name: Upload Themes
+            uses: actions/upload-artifact@v4
+            with:
+              name: ${{ matrix.scheme }}-theme
+              path: themes/*.deb
+
+    release:
+        needs: [prepare, package]
+        runs-on: macos-latest
+        strategy:
+            matrix:
+                scheme: [rootful, rootless]
+        steps:
+            - uses: actions/checkout@v5
+
+            - name: Download all DEBs
+              uses: actions/download-artifact@v4
+              with:
+                path: themes
+                merge-multiple: true
+
+            - name: Generate Checksums
+              id: metadata
+              shell: bash
+              run: |
+                for pkg in themes/*-iphoneos-arm.deb; do
+                  if [ -f "$pkg" ]; then
+                    echo "### Rootful (iphoneos-arm)" >> release_body.md
+                    echo "* MD5: $(md5 -q $pkg)" >> release_body.md
+                    echo "* SHA1: $(shasum -a 1 $pkg | awk '{ print $1 }')" >> release_body.md
+                    echo "* SHA256: $(shasum -a 256 $pkg | awk '{ print $1 }')" >> release_body.md
+                    echo "" >> release_body.md
+                    break
+                  fi
+                done
+
+                for pkg in themes/*-iphoneos-arm64.deb; do
+                  if [ -f "$pkg" ]; then
+                    echo "### Rootless (iphoneos-arm64)" >> release_body.md
+                    echo "* MD5: $(md5 -q $pkg)" >> release_body.md
+                    echo "* SHA1: $(shasum -a 1 $pkg | awk '{ print $1 }')" >> release_body.md
+                    echo "* SHA256: $(shasum -a 256 $pkg | awk '{ print $1 }')" >> release_body.md
+                    echo "" >> release_body.md
+                    break
+                  fi
+                done
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              env:
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                tag_name: v${{ needs.prepare.outputs.version }}
+                name: ${{ github.event.repository.name }} v${{ needs.prepare.outputs.version }}
+                body_path: release_body.md
+                files: themes/*.deb
+                draft: false
+                prerelease: false
+                make_latest: true
+
+            - name: Delete build artifacts
+              uses: geekyeggo/delete-artifact@v5
+              with:
+                name: |
+                  themes
+                failOnError: false
+                
